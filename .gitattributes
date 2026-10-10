@@ -1,0 +1,3 @@
+# The plugin ships plain JS that Node and the browser load as-is; keep every
+# checkout byte-identical to the working tree that was tested.
+* text=auto eol=lf
