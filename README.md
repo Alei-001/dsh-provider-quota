@@ -3,10 +3,10 @@
 DeepSeek Harness 的供应商额度指示器：在输入框的「联网搜索」左边显示当前模型供应商的剩余额度，点开是完整明细。
 
 ```
-[ 94% ]  [ 联网搜索 ]
+[ 94% ]  [ 模型 ]
 ```
 
-切换模型，数字跟着切换；这个供应商没有适配器，那里就什么都不显示 —— 空位好过拿别家的数字糊弄。
+切换模型，数字跟着切换；这个供应商没有适配器，那里就什么都不显示。
 
 ## 功能
 
@@ -80,17 +80,15 @@ dsh plugin --profile desktop add "git+ssh://git@github.com/Alei-001/dsh-provider
 ## 开发
 
 ```powershell
-# 测试用的一份 React（插件本身从浏览器模块表取 React）
+# 测试用的 React（插件本身从浏览器模块表取 React）
 mkdir "$env:TEMP\dspq-harness"; cd "$env:TEMP\dspq-harness"
 npm init -y; npm install react@18 react-dom@18
 ```
 
 ```powershell
-node scripts/smoke.mjs       # 292 条断言：宿主路由、适配器、客户端渲染、写路径、字典、更新检查
+node scripts/smoke.mjs       # 292 条断言
 node scripts/neg-proof.mjs   # 故意改坏 4 处，确认测试真会变红
 ```
-
-默认测 profile 里安装的那一份（宿主半要读 profile 的 peer 依赖）；测别的副本就设 `DSPQ_PLUGIN_DIR`。
 
 ## License
 
