@@ -298,55 +298,68 @@ of the page rather than a card whose fields can never be written.
 
 ## Install layout
 
+The source of truth is a Git repository, not a folder on disk:
+[`Alei-001/dsh-provider-quota`](https://github.com/Alei-001/dsh-provider-quota)
+(private). The profile installs **from that remote**:
+
+```powershell
+dsh plugin --profile desktop add "git+ssh://git@github.com/Alei-001/dsh-provider-quota.git"
+```
+
 | Path | Role |
 |---|---|
-| `<profile>/package.json` | the `file:` dependency that installs it, and the `dsh.profile.bundles` entry that composes it |
-| `<profile>/node_modules/dsh-provider-quota/` | the installed package DSH actually loads — a real directory |
+| `<profile>/package.json` | the `github:` dependency that installs it, and the `dsh.profile.bundles` entry that composes it |
+| `<profile>/node_modules/dsh-provider-quota/` | the installed package DSH actually loads — a real directory, store-backed |
 | `<profile>/cordis.patch.yml` | your own overrides; this package needs none |
 
-The profile is `%USERPROFILE%\.dsh\profiles\desktop` on this machine. It is
-installed the way a plugin is installed from a local folder:
+The profile is `%USERPROFILE%\.dsh\profiles\desktop` on this machine.
 
-```powershell
-dsh plugin --profile desktop add "file:C:/path/to/dsh-provider-quota"
-```
+### What the install actually is
 
-`file:` is not `link:`: the dependency pins a **real directory** in
-`node_modules`, not a junction or symlink — its `LinkType` is empty and the running
-plugin survives deleting or moving the source folder. It is **not** a byte-for-byte
-copy either. pnpm hard-links each file, so the two trees share inodes; on Windows
-both names show up in one list:
+A git spec, not `file:` and not `link:`. pnpm clones the repository, packs it
+(respecting `files`), puts the pack in its content-addressable store, and
+hard-links `node_modules` from there — the same materialization the marketplace's
+packages get. So:
 
-```powershell
-fsutil hardlink list "$env:USERPROFILE\.dsh\profiles\desktop\node_modules\dsh-provider-quota\lib\client.js"
-#   \Users\Alei\.dsh\profiles\desktop\node_modules\dsh-provider-quota\lib\client.js
-#   \Users\Alei\Documents\deepseek-harness\default-workspace\dsh-provider-quota\lib\client.js
-```
-
-That is pnpm's normal materialization for a `file:` **directory** dependency (the
-marketplace's packages are hard-linked the same way, with the pnpm store on the
-other end instead of a source folder), and `packageImportMethod: copy` does **not**
-change it: pnpm applies that setting to store-backed packages, while a directory
-dependency is always linked — verified by installing a scratch `file:` package with
-`packageImportMethod: copy` in force and watching `fsutil` still report two names.
-A byte-independent install would need a packed tarball
-(`file:./dsh-provider-quota-0.1.0.tgz`) or a published package, both of which add a
-packing step to every change.
-
-Three consequences worth knowing:
-
-- **An edit to the installed copy IS an edit to the source.** Same inode, so there
-  is no "installed copy" to patch behind the source's back. This is exactly how a
-  source file was corrupted once: the write went through the link.
-- **A source edit needs a reinstall.** An editor that replaces a file (write to a
-  temp name, then rename — the usual save) gives the source a new inode, so the
-  installed name keeps the old content and neither `pnpm install` nor `pnpm add`
-  refreshes it. Reinstall with the pair that does:
+- `node_modules/dsh-provider-quota` is a **real directory**: its `LinkType` and
+  `Target` are empty, and moving or deleting the working copy cannot break the
+  running plugin;
+- its files share an inode with the **store**, not with any working copy:
 
   ```powershell
-  dsh plugin --profile desktop remove dsh-provider-quota
-  dsh plugin --profile desktop add "file:C:/path/to/dsh-provider-quota"
+  fsutil hardlink list "$env:USERPROFILE\.dsh\profiles\desktop\node_modules\dsh-provider-quota\lib\client.js"
+  #   \Users\Alei\AppData\Local\pnpm\store\v11\files\d7\9a2a…
+  #   \Users\Alei\.dsh\profiles\desktop\node_modules\dsh-provider-quota\lib\client.js
   ```
+
+- the two trees are genuinely independent: appending a line to the working copy's
+  `lib/client.js` leaves the installed file's hash untouched (verified), and
+  editing the installed copy cannot reach the repository.
+
+### Changing the plugin
+
+```powershell
+git add -A
+git commit -m "…"
+git push
+dsh plugin --profile desktop remove dsh-provider-quota
+dsh plugin --profile desktop add "git+ssh://git@github.com/Alei-001/dsh-provider-quota.git"
+```
+
+`remove` + `add` is the pair that re-resolves the remote; `pnpm install` alone
+keeps the cached pack. Pin a tag (`…#v0.2.0`) instead of the branch when you want
+an install that cannot move under you.
+
+### Why not `file:`
+
+A `file:` directory dependency also installs a real directory, but pnpm hard-links
+each file **straight from the source folder**, so the two trees share inodes:
+editing the installed copy edits the source — which is how a source file was
+corrupted once, the write going through the link. `packageImportMethod: copy` does
+not change that: verified on a scratch package, with the setting in force and
+`pnpm config get package-import-method` reporting `copy`, pnpm still reported two
+names for a `file:` dependency. It applies to store-backed packages; a directory
+dependency is always linked. The git spec is what makes the install store-backed.
 
 - **It is removable from the Plugins page.** `installed: true` is what puts the
   bundle on that page and what draws its uninstall button; the button removes the
