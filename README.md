@@ -79,10 +79,11 @@ npm init -y; npm install react@18 react-dom@18
 ```
 
 ```powershell
-$env:DSPQ_PLUGIN_DIR = "$env:USERPROFILE\.dsh\profiles\desktop\node_modules\dsh-provider-quota"
-node scripts/smoke.mjs                            # 258 条断言：宿主路由、适配器、客户端渲染、写路径、字典
-node scripts/neg-proof.mjs $env:DSPQ_PLUGIN_DIR   # 故意改坏 4 处，确认测试真会变红
+node scripts/smoke.mjs       # 258 条断言：宿主路由、适配器、客户端渲染、写路径、字典
+node scripts/neg-proof.mjs   # 故意改坏 4 处，确认测试真会变红
 ```
+
+默认测 profile 里安装的那一份（宿主半要读 profile 的 peer 依赖）；测别的副本就设 `DSPQ_PLUGIN_DIR`。
 
 ## License
 

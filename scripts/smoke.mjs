@@ -10,17 +10,33 @@
 // The host half is driven end to end: a fixture upstream and a stub credential
 // store go in through the real route handler, and the normalised payload comes
 // out.
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
+import { homedir, tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 // React is a test-harness dependency only: the shipped plugin resolves `react`
 // from the shell's baseline module table, which no Node install can stand in for.
-// Both paths are overridable so this file stays free of machine-specific state:
-// `DSPQ_HARNESS_DIR` is the directory holding a `react` install, and
-// `DSPQ_PLUGIN_DIR` points the host-half checks at the installed copy, where
-// bare specifiers such as `@deepseek-ai/schemastery` resolve the real way.
-const harnessDir = process.env.DSPQ_HARNESS_DIR ?? 'C:/Users/Alei/AppData/Local/Temp/dspq-harness/package.json';
-const projectDir = process.env.DSPQ_PLUGIN_DIR ?? 'C:/Users/Alei/Documents/deepseek-harness/default-workspace/dsh-provider-quota';
+// Neither default carries machine-specific state:
+//  - `DSPQ_HARNESS_DIR` is the directory holding a `react` install, defaulting to
+//    the `dspq-harness` folder under the temp dir;
+//  - `DSPQ_PLUGIN_DIR` is what the checks read, defaulting to the profile's
+//    installed copy when there is one (the host half imports a peer —
+//    `@deepseek-ai/schemastery` — that only resolves there) and to this
+//    repository otherwise.
+const repoDir = join(dirname(fileURLToPath(import.meta.url)), '..');
+const profileCopy = join(
+  homedir(),
+  '.dsh',
+  'profiles',
+  process.env.DSH_PROFILE ?? 'desktop',
+  'node_modules',
+  'dsh-provider-quota',
+);
+const harnessDir = process.env.DSPQ_HARNESS_DIR ?? join(tmpdir(), 'dspq-harness', 'package.json');
+const projectDir =
+  process.env.DSPQ_PLUGIN_DIR ?? (existsSync(join(profileCopy, 'package.json')) ? profileCopy : repoDir);
 
 const require = createRequire(harnessDir);
 const React = require('react');
@@ -151,6 +167,7 @@ function cssOf(html) {
   return match === null ? '' : match[1];
 }
 
+console.log(`under test: ${projectDir}`);
 console.log('client half — bundle');
 const requested = [];
 const live = loadBundle((id) => {

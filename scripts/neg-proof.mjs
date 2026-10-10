@@ -4,23 +4,32 @@
 // which matters because the installed files are hard-linked to the source, so a
 // "temporary" edit there is a real edit here.
 //
-//   node scripts/neg-proof.mjs <pluginDir> [suitePath]
+//   node scripts/neg-proof.mjs [pluginDir] [suitePath]
 //
 // A mutation that produces no failures means the suite has stopped guarding it.
-import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const pluginDir = process.argv[2];
+const repoDir = join(here, '..');
+const profileCopy = join(
+  homedir(),
+  '.dsh',
+  'profiles',
+  process.env.DSH_PROFILE ?? 'desktop',
+  'node_modules',
+  'dsh-provider-quota',
+);
+// The copy is only mutated, so it needs no node_modules: the installed package is
+// the useful default, and the repository is the fallback.
+const pluginDir =
+  process.argv[2] ?? (existsSync(join(profileCopy, 'package.json')) ? profileCopy : repoDir);
 const suite = process.argv[3] ?? join(here, 'smoke.mjs');
-if (pluginDir === undefined) {
-  console.error('usage: node scripts/neg-proof.mjs <pluginDir> [suitePath]');
-  process.exit(2);
-}
 const stage = mkdtempSync(join(tmpdir(), 'dspq-neg-'));
+console.log(`mutating copies of: ${pluginDir}`);
 
 /** The mutations: a label and the replacement that breaks the guarded behaviour. */
 const MUTATIONS = [
