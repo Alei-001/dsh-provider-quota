@@ -55,7 +55,7 @@ dsh plugin --profile desktop add "git+ssh://git@github.com/Alei-001/dsh-provider
 
 **发一个新版本**：改 `package.json` 里的 `version`，提交推送，然后页面里点「更新」。
 
-> 版本号就是「有没有新版本」的开关 —— 页面读不到自己装的是哪个 commit，只能比对 profile 里的已装版本和仓库里的 `package.json`，所以每次发布都得 bump。检查由浏览器直接读 GitHub API 完成，仓库需要保持公开。
+版本不 bump 就不会提示；仓库需保持公开。
 
 ## 配置
 
