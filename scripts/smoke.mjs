@@ -125,6 +125,23 @@ async function mount(exports) {
         return () => {};
       },
     },
+    remote: {
+      // The update row's one dependency, as the client remotes expose it. The
+      // install call is recorded so the suite can read back the spec it was handed.
+      pluginManager: {
+        listBundles() { return Promise.resolve([{ name: 'dsh-provider-quota', version: '0.1.0' }]); },
+        installBundle(spec, options) {
+          seen.install = { spec, options };
+          return Promise.resolve({
+            changed: true,
+            application: 'restart-required',
+            stage: 'enable',
+            target: 'dsh-provider-quota',
+            packageResult: { exitCode: 0, output: '' },
+          });
+        },
+      },
+    },
     modelDirectories: {
       directoryFor(sessionId) {
         seen.directorySession = sessionId;
@@ -187,12 +204,13 @@ check(
 // --------------------------------------------------------------- slot placement
 console.log('client half — slot placement');
 const mounted = await mount(live.exports);
-check('waits for slots and modelDirectories', mounted.seen.inject[0]?.includes('modelDirectories') && mounted.seen.inject[0]?.includes('slots'), JSON.stringify(mounted.seen.inject[0]));
+check('waits for slots and modelDirectories', mounted.seen.inject.some((services) => services.includes('slots') && services.includes('modelDirectories')), JSON.stringify(mounted.seen.inject));
 check('declares locale and slots in its own inject', Array.isArray(live.exports.inject) && live.exports.inject.includes('locale') && live.exports.inject.includes('slots'), JSON.stringify(live.exports.inject));
 check('registers its dictionaries under one namespace', mounted.seen.dictionaries?.namespace === 'provider-quota', String(mounted.seen.dictionaries?.namespace));
 check('registers both languages', Object.keys(mounted.seen.dictionaries?.dicts ?? {}).join(',') === 'en,zh', Object.keys(mounted.seen.dictionaries?.dicts ?? {}).join(','));
 check('injects the composer tool-row slot', mounted.seen.slotKey === 'conversation.input.right', String(mounted.seen.slotKey));
 check('takes the settings form from its own inject', mounted.seen.inject.some((services) => services.includes('configForms')), JSON.stringify(mounted.seen.inject));
+check('asks the client remotes for the plugin manager', mounted.seen.inject.some((services) => services.includes('remote.pluginManager')), JSON.stringify(mounted.seen.inject));
 check('registers two components', mounted.registrations.length === 2, String(mounted.registrations.length));
 const spec = mounted.registrations.find(({ spec }) => spec.name === 'conversation.input.right')?.spec;
 check('uses its own cell id', spec?.id === 'provider-quota', spec?.id);
@@ -422,6 +440,44 @@ check(
   internal.routePaths('dsh-provider-quota/usage', 'http://127.0.0.1:19387/app/').join(' '),
 );
 
+// ------------------------------------------------------------------- the update
+// The row is offered on a version comparison, and the install it triggers is the
+// manager's, not ours: the only thing this package decides is the spec.
+console.log('client half — update');
+check('version: a newer release is newer', internal.isNewer('0.2.0', '0.1.0') === true);
+check('version: the same release is not newer', internal.isNewer('0.1.0', '0.1.0') === false);
+check('version: an older release is not newer', internal.isNewer('0.1.0', '0.2.0') === false);
+check('version: parts compare as numbers, not as text', internal.isNewer('0.10.0', '0.9.0') === true);
+check('version: a missing part counts as zero', internal.isNewer('1.0.1', '1.0') === true && internal.isNewer('1.0', '1.0.0') === false);
+check(
+  'version: a leading v and a prerelease suffix are tolerated',
+  internal.isNewer('v1.0.0', '0.9.9') === true && internal.isNewer('1.0.0-rc.1', '1.0.0') === false,
+);
+check('version: junk never reads as newer', internal.isNewer('banana', '0.1.0') === false && internal.isNewer('0.2.0', null) === false);
+const availableDecision = internal.updateDecision('0.1.0', '0.2.0', 'deadbeef');
+check('decision: a newer remote offers the update', availableDecision.status === 'available' && availableDecision.sha === 'deadbeef', JSON.stringify(availableDecision));
+const currentDecision = internal.updateDecision('0.2.0', '0.2.0', 'deadbeef');
+check('decision: an up-to-date install offers nothing', currentDecision.status === 'current' && currentDecision.sha === null, JSON.stringify(currentDecision));
+check(
+  'bundles: the installed version is read by package name',
+  internal.installedVersion([{ name: 'other', version: '9.9.9' }, { name: 'dsh-provider-quota', version: '0.1.0' }]) === '0.1.0',
+);
+check('bundles: an absent package has no version', internal.installedVersion([]) === null && internal.installedVersion(null) === null);
+check(
+  'github: the base64 manifest yields its version',
+  internal.remoteVersion({ content: Buffer.from(JSON.stringify({ version: '0.2.0' })).toString('base64') }) === '0.2.0',
+);
+check('github: a malformed answer yields no version', internal.remoteVersion({ content: '!!!' }) === null && internal.remoteVersion(null) === null);
+check('failure: a failed run reports its diagnostic', internal.updateFailure({ application: 'failed', error: { diagnostic: 'boom' } }) === 'boom');
+check('failure: a non-zero pnpm exit reports its output', internal.updateFailure({ application: 'restart-required', packageResult: { exitCode: 1, output: 'ENOENT' } }) === 'ENOENT');
+check('failure: a successful run reports nothing', internal.updateFailure({ application: 'restart-required', packageResult: { exitCode: 0, output: '' } }) === null);
+check('failure: a cancelled run is a failure too', internal.updateFailure({ application: 'cancelled' }) === 'cancelled');
+check(
+  'spec: the install spec pins the commit in the alias form',
+  internal.installSpecFor('deadbeef') === 'dsh-provider-quota@github:Alei-001/dsh-provider-quota#deadbeef',
+  internal.installSpecFor('deadbeef'),
+);
+
 // ------------------------------------------------------------------- stylesheet
 // Covered above, where the shell's own render supplies the stylesheet.
 
@@ -471,6 +527,36 @@ check('a collapsed card still states the cut points', collapsedHtml.includes('�
 check('the header is a button with a labelled disclosure', collapsedHtml.includes('aria-label="展开: 供应商额度"') && collapsedHtml.includes('dsog-chevron'));
 check('the open card points its header at the body', /aria-controls="([^"]+)"/.test(settingsHtml) && settingsHtml.includes('class="dsog-card-body" id="'));
 check('the open card says how to close it', settingsHtml.includes('aria-label="收起: 供应商额度"') && settingsHtml.includes('data-open="true"'));
+
+// The update row: it appears inside the expanded card, and only while the remote
+// carries a newer release. Nothing is added to the header row — the card opens on
+// exactly the same title, summary and chevron it always had.
+const renderCard = (extra) =>
+  renderToStaticMarkup(
+    React.createElement(internal.ProviderQuotaSettings, Object.assign({ view: 'page', form: settingsForm, defaultOpen: true }, extra)),
+  );
+const idleUpdate = { status: 'idle', installed: null, remote: null, sha: null, busy: false, error: null, notice: null };
+internal.__primeUpdate({ status: 'available', installed: '0.1.0', remote: '0.2.0', sha: 'deadbeefcafe1234', busy: false, error: null, notice: null });
+const updateHtml = renderCard({});
+check('an available update adds one row', updateHtml.includes('class="dsog-update"') && updateHtml.includes('有新版本 v0.2.0'), updateHtml.slice(0, 200));
+check('the row names the installed version and the commit', updateHtml.includes('当前 v0.1.0') && updateHtml.includes('deadbee'));
+check('the row offers the update', updateHtml.includes('>更新<'));
+check('the row sits above the diagnostics', updateHtml.indexOf('class="dsog-update"') < updateHtml.indexOf('class="dsog-page-title"'));
+check('nothing was added to the header row', !updateHtml.slice(0, updateHtml.indexOf('dsog-card-body')).includes('更新'));
+internal.__primeUpdate({ status: 'available', installed: '0.1.0', remote: '0.2.0', sha: 'deadbeefcafe1234', busy: false, error: 'ENOENT', notice: null });
+check('a failed update says why in the row', renderCard({}).includes('更新失败：ENOENT'));
+internal.__primeUpdate({ status: 'updated', installed: '0.1.0', remote: '0.2.0', sha: null, busy: false, error: null, notice: { version: '0.2.0', application: 'restart-required' } });
+const updatedHtml = renderCard({});
+check('a finished update leaves the restart notice', updatedHtml.includes('已更新到 v0.2.0') && updatedHtml.includes('重启 DSH') && updatedHtml.includes('知道了'));
+check('the finished notice replaces the update button', !updatedHtml.includes('>更新<'));
+internal.__primeUpdate({ status: 'current', installed: '0.2.0', remote: '0.2.0', sha: null, busy: false, error: null, notice: null });
+const currentHtml = renderCard({});
+check('an up-to-date install shows no update row', !currentHtml.includes('class="dsog-update"') && !currentHtml.includes('更新'), currentHtml.slice(0, 160));
+const collapsedUpdate = renderToStaticMarkup(
+  React.createElement(internal.ProviderQuotaSettings, { view: 'page', form: settingsForm }),
+);
+check('a collapsed card hides the row as well', !collapsedUpdate.includes('class="dsog-update"'));
+internal.__primeUpdate(idleUpdate);
 check(
   'the page says so when the Host offers no form',
   renderToStaticMarkup(
@@ -667,6 +753,32 @@ check(
   'and with no state nothing is written',
   typeof button(stateless.render(), '保存')?.props.disabled === 'boolean',
 );
+
+// The update button, through the same dispatcher rig. What matters is the spec the
+// manager is handed: the alias form with the commit pinned, which is the only
+// shape `pnpm add` re-resolves instead of answering "Already up to date".
+internal.__primeUpdate({ status: 'available', installed: '0.1.0', remote: '0.2.0', sha: 'deadbeefcafe1234', busy: false, error: null, notice: null });
+const cardRender = hookRender(live.exports.__internal.ProviderQuotaSettings, { view: 'page', form: readyForm, defaultOpen: true });
+const rowElement = find(cardRender(), (node) => node.type === internal.UpdateRow);
+check('the card wires the update row to its own install action', rowElement !== null && rowElement.props.state.remote === '0.2.0');
+const rowTree = hookRender(internal.UpdateRow, rowElement.props)();
+const updateControl = button(rowTree, '更新');
+check('the update control is reachable', typeof updateControl?.props.onClick === 'function');
+await updateControl.props.onClick();
+await new Promise((resolve) => setTimeout(resolve, 0));
+check(
+  'the update asks the manager for the pinned spec',
+  mounted.seen.install?.spec === 'dsh-provider-quota@github:Alei-001/dsh-provider-quota#deadbeefcafe1234',
+  JSON.stringify(mounted.seen.install),
+);
+check('the update leaves the bundle enabled', mounted.seen.install?.options?.enabled === true, JSON.stringify(mounted.seen.install?.options));
+const afterTree = cardRender();
+check(
+  'a finished update swaps the row for the restart notice',
+  find(afterTree, (node) => node.type === internal.UpdateRow) === null &&
+    find(afterTree, (node) => node.type === internal.UpdateNotice)?.props.notice.application === 'restart-required',
+);
+internal.__primeUpdate(idleUpdate);
 
 // The bundle-config seat renders a wrapper that subscribes to the entry form.
 // Its methods must be called ON the form: a detached `subscribe`/`getSnapshot`

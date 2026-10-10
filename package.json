@@ -1,6 +1,6 @@
 {
   "name": "dsh-provider-quota",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Provider-aware quota meter for the DeepSeek Harness composer: a ring beside the web-search option showing the active model provider's remaining quota.",
   "license": "MIT",

@@ -23,6 +23,10 @@ param(
     # 提交信息；省略时用时间戳。
     [Parameter(Position = 0)][string]$Message,
 
+    # 发布版本号；给了就写进 package.json 再提交。
+    # 它是"有没有新版本"的开关：页面里的更新提示比对的就是这个号，不 bump 就不提示。
+    [string]$Version,
+
     # DSH profile 名。
     [string]$Profile = 'desktop',
 
@@ -55,6 +59,20 @@ $dsh = Resolve-DshCli -Explicit $DshCli
 
 Push-Location $repo
 try {
+    # 0. 版本号（可选）
+    if ($Version) {
+        $manifestPath = Join-Path $repo 'package.json'
+        $manifest = Get-Content $manifestPath -Raw
+        if ($manifest -match '"version"\s*:\s*"' + [regex]::Escape($Version) + '"') {
+            Write-Host "[0/3] 版本已是 $Version。" -ForegroundColor DarkGray
+        } else {
+            $bumped = $manifest -replace '("version"\s*:\s*")[^"]+(")', "`${1}$Version`${2}"
+            if ($bumped -eq $manifest) { throw 'package.json 里没有找到 version 字段。' }
+            Set-Content $manifestPath -Value $bumped -NoNewline -Encoding UTF8
+            Write-Host "[0/3] package.json 版本 → $Version" -ForegroundColor Green
+        }
+    }
+
     # 1. 提交
     git add -A
     if (git diff --cached --name-only) {
