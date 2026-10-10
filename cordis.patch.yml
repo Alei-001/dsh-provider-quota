@@ -1,0 +1,9 @@
+# Provider quota meter for the composer.
+#
+# The host half owns a registry of per-provider adapters and serves two
+# same-origin read routes; the client half renders the ring for whichever
+# provider the session's model selection names, and renders nothing at all for a
+# provider no adapter covers. Nothing here is model-facing.
+- insert:
+    - id: provider-quota
+      name: dsh-provider-quota
