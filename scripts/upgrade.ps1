@@ -30,6 +30,9 @@ param(
     # DSH profile 名。
     [string]$Profile = 'desktop',
 
+    # 只提交推送、不动本机安装（发布给别的机器，或想留着让页面里的「更新」去装）。
+    [switch]$SkipInstall,
+
     # 重装后跑一遍 scripts/smoke.mjs（需要 DSPQ_HARNESS_DIR 指向一份 React 安装）。
     [switch]$Test,
 
@@ -107,10 +110,14 @@ try {
     }
     $head = (git rev-parse HEAD).Trim()
     $target = "$package@" + ($spec -split '#')[0] + "#$head"
-    & $dsh plugin --profile $Profile add $target
-    if ($LASTEXITCODE -ne 0) { throw "更新失败（exit $LASTEXITCODE）。" }
-    Write-Host "[3/3] 已安装 $target" -ForegroundColor Green
-    Write-Host "      （提交 $($head.Substring(0, 7))）" -ForegroundColor DarkGray
+    if ($SkipInstall) {
+        Write-Host "[3/3] 跳过安装（-SkipInstall）。要装的话：dsh plugin --profile $Profile add `"$target`"" -ForegroundColor DarkGray
+    } else {
+        & $dsh plugin --profile $Profile add $target
+        if ($LASTEXITCODE -ne 0) { throw "更新失败（exit $LASTEXITCODE）。" }
+        Write-Host "[3/3] 已安装 $target" -ForegroundColor Green
+        Write-Host "      （提交 $($head.Substring(0, 7))）" -ForegroundColor DarkGray
+    }
 
     if ($Test) {
         $env:DSPQ_PLUGIN_DIR = Join-Path $profileDir "node_modules\$package"

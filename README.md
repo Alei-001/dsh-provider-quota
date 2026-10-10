@@ -36,18 +36,31 @@ dsh plugin --profile desktop add "git+ssh://git@github.com/Alei-001/dsh-provider
 
 ## 升级
 
-```powershell
-.\scripts\upgrade.ps1 "改了点什么"
+在插件页展开「供应商额度」卡片。**远端有新版本时，面板里会自动多出一行**（平时没有这一行，卡片头部也不会有任何变化）：
+
+```
+有新版本 v0.2.1
+当前 v0.2.0 · cc2b196                     [ 更新 ]
 ```
 
-一条命令搞定：提交 → 推送 → 重装。手动的话是：
+点「更新」就行：它让 DSH 的插件管理器从仓库拉取那一个 commit，装好后**客户端半会自动重载**（DSH 的客户端 HMR 每 500ms 轮询一次 bundle 的元数据），不用刷新页面。如果这次发布改到了宿主半（`lib/index.js`），会提示**重启 DSH 生效**——宿主进程里的模块不会热替换。
+
+命令行兜底（第一次安装、或者页面进不去的时候）：
 
 ```powershell
-git add -A; git commit -m "…"; git push
-dsh plugin --profile desktop update dsh-provider-quota
+.\scripts\upgrade.ps1 -Version 0.2.1 "改了点什么"
 ```
 
-客户端改动**刷新页面**生效；宿主改动要**重启 DSH**。
+三步：提交 → 推送 → 把新 commit 钉进 profile 的依赖并重装。`-Test` 会在重装后跑一遍冒烟测试。
+
+### 为什么每次发布都要带版本号
+
+因为**版本号就是"有没有新版本"的开关**。客户端读不到自己装的是哪个 commit，只能拿 profile 里的已装版本（`0.1.0`）和 GitHub 上的 `package.json` 版本比对；远端不大于本地就不提示。`-Version` 参数会替你改这一行，忘了带就不会弹更新。
+
+### 两个前提
+
+- **仓库必须公开**：更新检查是在浏览器里直接读 GitHub REST API（`/commits/main` 和 `/contents/package.json`），未认证请求只对公开仓库有效。仓库在 [Alei-001/dsh-provider-quota](https://github.com/Alei-001/dsh-provider-quota)。
+- **检查失败时不显示任何东西**：离线、限流、接口改了，都只是安静地不提示，不会给页面添乱。
 
 ## 配置
 
@@ -68,6 +81,7 @@ dsh plugin --profile desktop update dsh-provider-quota
 
 - 宿主提供两个同源只读路由：`/dsh-provider-quota/providers`（本机能测哪些供应商）和 `/dsh-provider-quota/usage?provider=<id>`（某个供应商的余量）。
 - **不存任何密钥**：需要认证的适配器只按名字去 DSH 凭据服务读。
+- 打开本插件的页面时，浏览器会向 `api.github.com` 发一到两次未认证请求做版本检查；除此之外没有别的外部请求。
 - 已知限制：OpenCode Go 是内部接口，只给百分比；上游用量日志和仪表盘有已知不一致。
 
 ## 开发
@@ -79,7 +93,7 @@ npm init -y; npm install react@18 react-dom@18
 ```
 
 ```powershell
-node scripts/smoke.mjs       # 258 条断言：宿主路由、适配器、客户端渲染、写路径、字典
+node scripts/smoke.mjs       # 292 条断言：宿主路由、适配器、客户端渲染、写路径、字典、更新检查
 node scripts/neg-proof.mjs   # 故意改坏 4 处，确认测试真会变红
 ```
 
