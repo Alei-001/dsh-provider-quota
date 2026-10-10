@@ -88,3 +88,5 @@ node scripts/neg-proof.mjs   # 故意改坏 4 处，确认测试真会变红
 ## License
 
 MIT
+
+<!-- update probe: 2026-10-10T23:32:59.6231248+08:00 -->
