@@ -95,17 +95,22 @@ try {
         Write-Host '[2/3] 远端已是最新。' -ForegroundColor DarkGray
     }
 
-    # 3. 更新安装
+    # 3. 更新安装：把刚推送的 commit 钉进 spec 里。
+    #    为什么不是 `update`：profile 里的 spec 已经形如 `…#<commit>`，pnpm 会忠实地
+    #    装回那个旧 commit —— 只有 specifier 变了它才重新解析。页面里的更新按钮用的
+    #    是同一招（`dsh-provider-quota@github:owner/repo#<commit>`）。
     $profileJson = Join-Path $profileDir 'package.json'
     if (-not (Test-Path $profileJson)) { throw "找不到 profile：$profileJson" }
     $spec = (Get-Content $profileJson -Raw | ConvertFrom-Json).dependencies.$package
     if (-not $spec) {
         throw "profile 的 dependencies 里没有 $package。先跑一次：`n  dsh plugin --profile $Profile add ""git+ssh://git@github.com/Alei-001/$package.git"""
     }
-    & $dsh plugin --profile $Profile update $package
+    $head = (git rev-parse HEAD).Trim()
+    $target = "$package@" + ($spec -split '#')[0] + "#$head"
+    & $dsh plugin --profile $Profile add $target
     if ($LASTEXITCODE -ne 0) { throw "更新失败（exit $LASTEXITCODE）。" }
-    $head = (git rev-parse --short HEAD)
-    Write-Host "[3/3] 已更新 $package（$spec @ $head）。" -ForegroundColor Green
+    Write-Host "[3/3] 已安装 $target" -ForegroundColor Green
+    Write-Host "      （提交 $($head.Substring(0, 7))）" -ForegroundColor DarkGray
 
     if ($Test) {
         $env:DSPQ_PLUGIN_DIR = Join-Path $profileDir "node_modules\$package"
