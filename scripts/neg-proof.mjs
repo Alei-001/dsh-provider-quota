@@ -101,6 +101,48 @@ const MUTATIONS = [
       return shared;
     },
   },
+  {
+    label: 'the hour has no budget',
+    why: 'the check cadence is bounded by nothing, so a reader who alt-tabs spends the rate limit',
+    mutate(code) {
+      const unbounded = code.replace('return recent < CHECKS_PER_HOUR;', 'return true;');
+      if (unbounded === code) throw new Error('hourly budget not found');
+      return unbounded;
+    },
+  },
+  {
+    label: 'a re-check blanks the row',
+    why: 'the transient checking status takes the row off the card again, which is where it started',
+    mutate(code) {
+      const blanked = code.replace(
+        'if (previous.status === "idle" || previous.status === "checking") next.status = "checking";',
+        'next.status = "checking";',
+      );
+      if (blanked === code) throw new Error('verdict-keeping guard not found');
+      return blanked;
+    },
+  },
+  {
+    label: 'a failed re-check withdraws the row',
+    why: 'an answer that never came passes for "nothing to install", which is the failure this set out to end',
+    mutate(code) {
+      const withdrawn = code.replace(
+        'if (previous.status === "available" || previous.status === "updated") return kept;',
+        'if (false) return kept;',
+      );
+      if (withdrawn === code) throw new Error('row-keeping guard not found');
+      return withdrawn;
+    },
+  },
+  {
+    label: 'a check landing after unmount still arms',
+    why: 'the promise arms a retry timer after the effect has been torn down, and nothing will clear it',
+    mutate(code) {
+      const orphaned = code.replace('if (live !== true) return status;', 'if (live === "no") return status;');
+      if (orphaned === code) throw new Error('liveness guard not found');
+      return orphaned;
+    },
+  },
 ];
 
 let proved = 0;

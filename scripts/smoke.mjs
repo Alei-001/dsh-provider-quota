@@ -68,8 +68,17 @@ const fakeDocument = {
   getElementById: () => null,
   createElement: () => ({ id: '', set textContent(value) { capturedCss = value; } }),
   head: { appendChild() {} },
-  addEventListener() {},
-  removeEventListener() {},
+  visibilityState: 'visible',
+  listeners: {},
+  addEventListener(name, handler) {
+    (this.listeners[name] ??= []).push(handler);
+  },
+  removeEventListener(name, handler) {
+    this.listeners[name] = (this.listeners[name] ?? []).filter((entry) => entry !== handler);
+  },
+  fire(name) {
+    for (const handler of [...(this.listeners[name] ?? [])]) handler({ type: name });
+  },
 };
 void capturedCss;
 
@@ -85,23 +94,64 @@ const fakeSessionStorage = {
   removeItem: (key) => sessionStore.delete(key),
 };
 
+/**
+ * A window with the timer, event and storage surface a browser has, and the
+ * handles kept so the suite can fire a beat or a tab return by hand. A harness
+ * that stubs these into no-ops only proves the bundle's guards work: every
+ * cadence this card has lives in that surface, so it is the surface the tests
+ * have to drive.
+ */
+function createShell() {
+  return {
+    intervals: [],
+    timeouts: [],
+    listeners: {},
+    setInterval(callback, ms) {
+      this.intervals.push({ callback, ms, cleared: false });
+      return this.intervals.length;
+    },
+    clearInterval(handle) {
+      const timer = this.intervals[handle - 1];
+      if (timer !== undefined) timer.cleared = true;
+    },
+    setTimeout(callback, ms) {
+      this.timeouts.push({ callback, ms, cleared: false });
+      return this.timeouts.length;
+    },
+    clearTimeout(handle) {
+      const timer = this.timeouts[handle - 1];
+      if (timer !== undefined) timer.cleared = true;
+    },
+    addEventListener(name, handler) {
+      (this.listeners[name] ??= []).push(handler);
+    },
+    removeEventListener(name, handler) {
+      this.listeners[name] = (this.listeners[name] ?? []).filter((entry) => entry !== handler);
+    },
+    fire(name) {
+      for (const handler of [...(this.listeners[name] ?? [])]) handler({ type: name });
+    },
+    pendingTimeouts() {
+      return this.timeouts.filter((timer) => timer.cleared !== true);
+    },
+    /** Fire every armed timeout, as a clock would, and consume its handle. */
+    fireTimeouts() {
+      for (const timer of this.pendingTimeouts()) {
+        timer.cleared = true;
+        timer.callback();
+      }
+    },
+  };
+}
+
 /** Materialize the shipped bundle against one require implementation. */
 function loadBundle(requireImpl) {
   const code = readFileSync(`${projectDir}/lib/client.js`, 'utf8');
   let bundle = null;
-  // A shell with the timer, event and storage surface a browser has. The bundle
-  // asks for all of them, and a harness that lacks them would only prove the
-  // guards work.
-  const win = {
+  const win = Object.assign(createShell(), {
     __ModuleLoader__: { load(spec) { bundle = spec; } },
-    setInterval: () => 0,
-    clearInterval() {},
-    setTimeout: () => 0,
-    clearTimeout() {},
-    addEventListener() {},
-    removeEventListener() {},
     sessionStorage: fakeSessionStorage,
-  };
+  });
   new Function('window', 'document', code)(win, fakeDocument);
   return { bundle, exports: bundle.factory(requireImpl), win };
 }
@@ -703,7 +753,7 @@ const updatedHtml = renderCard({});
 check('a finished update leaves the restart notice', updatedHtml.includes('已更新到 v0.2.0') && updatedHtml.includes('重启 DSH') && updatedHtml.includes('知道了'));
 check('the finished notice replaces the update button', !updatedHtml.includes('>更新<'));
 check('the finished notice rides the card as well', !renderCollapsedCard().includes('class="dsog-card-body"') && renderCollapsedCard().includes('已更新到 v0.2.0'));
-internal.__primeUpdate({ status: 'error', installed: null, remote: null, sha: null, busy: false, error: 'GitHub 403', unreadable: false, notice: null });
+internal.__primeUpdate({ status: 'error', installed: null, remote: null, sha: null, busy: false, error: null, checkError: 'GitHub 403', checkUnreadable: false, notice: null });
 const failedCheckHtml = renderCard({});
 check(
   'a check that could not answer says so in the body',
@@ -712,7 +762,7 @@ check(
   failedCheckHtml.slice(failedCheckHtml.indexOf('dsog-card-body'), failedCheckHtml.indexOf('dsog-card-body') + 300),
 );
 check('and says nothing in the header', !renderCollapsedCard().includes('版本检查失败'));
-internal.__primeUpdate({ status: 'error', installed: null, remote: null, sha: null, busy: false, error: null, unreadable: true, notice: null });
+internal.__primeUpdate({ status: 'error', installed: null, remote: null, sha: null, busy: false, error: null, checkError: null, checkUnreadable: true, notice: null });
 check('an unreadable answer says which half is missing', renderCard({}).includes('读不到已安装版本或仓库版本'));
 internal.__primeUpdate({ status: 'current', installed: '0.2.0', remote: '0.2.0', sha: null, busy: false, error: null, notice: null });
 const currentHtml = renderCard({});
@@ -757,14 +807,33 @@ globalThis.fetch = async () => ({
   }),
 });
 
-/** Render any page component with a minimal dispatcher, so click handlers run.
- *  `useSyncExternalStore` calls the getter it was handed, exactly as React does:
- *  a getter detached from its form then throws here, which is the bug that once
- *  abdicated the bundle-config entry and left the page silently empty. */
-function hookRender(Component, props) {
+/**
+ * Render any page component with a minimal dispatcher, so click handlers run.
+ * `useSyncExternalStore` calls the getter it was handed, exactly as React does:
+ * a getter detached from its form then throws here, which is the bug that once
+ * abdicated the bundle-config entry and left the page silently empty.
+ *
+ * Slot state, refs and memos persist across renders, as they do in an instance:
+ * a rig that hands back a fresh ref every render silently disarms every ref-based
+ * decision in the code under test (the retry allowance among them), and a
+ * `useCallback` that never memoizes re-runs every effect that depends on it.
+ *
+ * With `{ effects: true }` the rig also runs effects after each pass and honours
+ * their deps and cleanups, which is how the card's own cadence — the mount check,
+ * the tab return, the beat, the retry — becomes reachable from this suite. The
+ * returned render function carries `cleanup()` for unmount.
+ */
+function hookRender(Component, props, options) {
+  const runEffects = options?.effects === true;
   const states = [];
   const setters = [];
+  const refs = [];
+  const memos = [];
+  const effects = [];
   const cursor = { value: 0 };
+  const refCursor = { value: 0 };
+  const memoCursor = { value: 0 };
+  const effectCursor = { value: 0 };
   const dispatcher = {
     useState(initial) {
       const index = cursor.value;
@@ -777,31 +846,90 @@ function hookRender(Component, props) {
       }
       return [states[index], setters[index]];
     },
-    useEffect() {},
-    useLayoutEffect() {},
-    useCallback(handler) { return handler; },
-    useRef(value) { return { current: value }; },
+    useEffect(callback, deps) {
+      const index = effectCursor.value;
+      effectCursor.value += 1;
+      if (!runEffects) return undefined;
+      const previous = effects[index];
+      const changed =
+        previous === undefined ||
+        deps === undefined ||
+        previous.deps === undefined ||
+        deps.length !== previous.deps.length ||
+        deps.some((entry, position) => !Object.is(entry, previous.deps[position]));
+      if (changed) effects[index] = { deps, callback, pending: true, cleanup: previous?.cleanup };
+      return undefined;
+    },
+    useLayoutEffect(callback, deps) {
+      return dispatcher.useEffect(callback, deps);
+    },
+    useCallback(handler, deps) {
+      return memoized(() => handler, deps);
+    },
+    useMemo(factory, deps) {
+      return memoized(factory, deps);
+    },
+    useRef(value) {
+      const index = refCursor.value;
+      refCursor.value += 1;
+      if (!(index in refs)) refs[index] = { current: value };
+      return refs[index];
+    },
     useSyncExternalStore(subscribe, snapshot) {
       if (typeof subscribe === 'function') subscribe(() => {});
       return snapshot();
     },
     readContext() { return undefined; },
   };
-  return () => {
+  function memoized(factory, deps) {
+    const index = memoCursor.value;
+    memoCursor.value += 1;
+    const previous = memos[index];
+    const same =
+      previous !== undefined &&
+      deps !== undefined &&
+      previous.deps !== undefined &&
+      deps.length === previous.deps.length &&
+      deps.every((entry, position) => Object.is(entry, previous.deps[position]));
+    if (!same) memos[index] = { deps, value: factory() };
+    return memos[index].value;
+  }
+  function commit() {
+    for (const slot of effects) {
+      if (slot === undefined || slot.pending !== true) continue;
+      slot.pending = false;
+      if (typeof slot.cleanup === 'function') slot.cleanup();
+      const cleanup = slot.callback();
+      slot.cleanup = typeof cleanup === 'function' ? cleanup : undefined;
+    }
+  }
+  const render = () => {
     cursor.value = 0;
+    refCursor.value = 0;
+    memoCursor.value = 0;
+    effectCursor.value = 0;
     internals.ReactCurrentDispatcher.current = dispatcher;
+    let node = null;
     try {
       // Expand function components so a seat wrapper's inner page is reachable;
       // hook slots keep counting across the expansion, as they do in React.
-      let node = Component(props);
+      node = Component(props);
       for (let depth = 0; depth < 4 && node !== null && typeof node === 'object' && typeof node.type === 'function'; depth += 1) {
         node = node.type(node.props);
       }
-      return node;
     } finally {
       internals.ReactCurrentDispatcher.current = null;
     }
+    if (runEffects) commit();
+    return node;
   };
+  render.cleanup = () => {
+    for (const slot of effects) {
+      if (slot !== undefined && typeof slot.cleanup === 'function') slot.cleanup();
+      if (slot !== undefined) slot.cleanup = undefined;
+    }
+  };
+  return render;
 }
 
 function settingsRig(form, outcome) {
@@ -958,6 +1086,164 @@ await dismissControl.props.onClick();
 check('dismissing it takes the notice off the card', find(noticeRender(), (node) => node.type === internal.UpdateNotice) === null);
 check('dismissing it forgets the notice', live.win.sessionStorage.getItem(NOTICE_KEY) === null);
 check('a dismissed notice stays gone on the next mount', find(hookRender(live.exports.__internal.ProviderQuotaSettings, { view: 'page', form: readyForm })(), (node) => node.type === internal.UpdateNotice) === null);
+
+// ------------------------------------------------------------ the update cadence
+// Everything above renders markup. This block runs the card's effects, on a clock
+// and a network the suite owns: mount check, tab return, beat, retry, cleanup and
+// the row's survival across a re-check all live in that half, and a suite that
+// stubs effects into no-ops cannot see any of them.
+console.log('client half — update cadence');
+const shell = live.win;
+const realNow = Date.now;
+let clock = realNow();
+const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+shell.intervals.length = 0;
+shell.timeouts.length = 0;
+shell.listeners = {};
+fakeDocument.listeners = {};
+Date.now = () => clock;
+
+const githubCalls = [];
+const checkTimes = [];
+/** GitHub answering the two version-check reads, and counting what it was asked. */
+function githubStub(version) {
+  return async (url) => {
+    githubCalls.push(String(url));
+    if (String(url).includes('/contents/package.json')) checkTimes.push(clock);
+    if (String(url).includes('/contents/package.json')) {
+      return { ok: true, status: 200, json: async () => ({ content: Buffer.from(JSON.stringify({ version })).toString('base64') }) };
+    }
+    if (String(url).includes('/commits/')) return { ok: true, status: 200, json: async () => ({ sha: 'deadbeefcafe1234' }) };
+    return { ok: false, status: 404, json: async () => ({}) };
+  };
+}
+const reads = () => githubCalls.filter((url) => url.includes('/contents/package.json')).length;
+/** The busiest hour the check ever spent, which is what the API's budget bounds. */
+const busiestHour = () => {
+  let worst = 0;
+  for (const at of checkTimes) {
+    const within = checkTimes.filter((other) => other > at - 3600000 && other <= at).length;
+    if (within > worst) worst = within;
+  }
+  return worst;
+};
+const markupOf = (tree) => renderToStaticMarkup(tree);
+const rowOf = (tree) => find(tree, (node) => node.type === internal.UpdateRow);
+
+globalThis.fetch = githubStub('0.2.0');
+internal.__primeUpdate(idleUpdate);
+const cadence = hookRender(internal.ProviderQuotaSettings, { view: 'page', form: readyForm, defaultOpen: true }, { effects: true });
+cadence();
+check('a mounted card asks for the published version', reads() === 1, String(reads()));
+await flush();
+check('a newer release costs the commit read as well', reads() === 1 && asked.some((url) => url.includes('/commits/')));
+check(
+  'the beat runs on the documented cadence',
+  shell.intervals.filter((timer) => timer.ms === 900000 && timer.cleared !== true).length === 1,
+  JSON.stringify(shell.intervals.map((timer) => timer.ms)),
+);
+check(
+  'the card listens for a return to the tab, on either surface',
+  (shell.listeners.focus ?? []).length >= 1 && (fakeDocument.listeners.visibilitychange ?? []).length >= 1,
+  JSON.stringify({ window: Object.keys(shell.listeners), document: Object.keys(fakeDocument.listeners) }),
+);
+check('the row is up once the verdict lands', rowOf(cadence()) !== null);
+
+shell.fire('focus');
+await flush();
+check('a tab return inside the floor costs nothing', reads() === 1, String(reads()));
+clock += 6 * 60 * 1000;
+shell.fire('focus');
+await flush();
+check('a tab return after the floor asks again', reads() === 2, String(reads()));
+
+// The row is what the card knows, not what this instant's status says: a re-check
+// nobody asked for must not take it off the screen between its question and its
+// answer.
+clock += 6 * 60 * 1000;
+shell.fire('focus');
+check('a re-check does not blink the row off the card', rowOf(cadence()) !== null);
+await flush();
+
+// Three hours of flipping between windows, six minutes apart: the budget bounds
+// what any single hour of that spends, so a reader who alt-tabs cannot turn the
+// check into the rate limit that stops it answering.
+const beforeFlips = checkTimes.length;
+for (let flip = 0; flip < 30; flip += 1) {
+  clock += 6 * 60 * 1000;
+  shell.fire('focus');
+  fakeDocument.fire('visibilitychange');
+}
+await flush();
+const flippedChecks = checkTimes.length - beforeFlips;
+check('no hour of window flipping holds more than the budget', busiestHour() <= 6, String(busiestHour()));
+check('and thirty flips did not buy thirty checks', flippedChecks < 30, String(flippedChecks));
+
+// A check that cannot answer: one retry rather than a chain, the row kept, and the
+// reason said out loud.
+clock += 120 * 60 * 1000;
+globalThis.fetch = async () => {
+  throw new Error('GitHub 403');
+};
+fakeDocument.fire('visibilitychange');
+await flush();
+const armed = shell.pendingTimeouts();
+check('a failing check arms exactly one retry', armed.length === 1 && armed[0].ms === 60000, JSON.stringify(armed.map((timer) => timer.ms)));
+const failedTree = cadence();
+check('a failed re-check keeps the row it had', rowOf(failedTree) !== null);
+check('a failed re-check says why in the body', markupOf(failedTree).includes('版本检查失败：GitHub 403'));
+shell.fireTimeouts();
+await flush();
+check('the retry is spent, not chained', shell.pendingTimeouts().length === 0, String(shell.pendingTimeouts().length));
+
+// A later answer clears the complaint and re-arms the allowance.
+clock += 120 * 60 * 1000;
+globalThis.fetch = githubStub('0.2.0');
+fakeDocument.fire('visibilitychange');
+await flush();
+check('an answer clears the last complaint', !markupOf(cadence()).includes('版本检查失败'));
+globalThis.fetch = async () => {
+  throw new Error('GitHub 403');
+};
+clock += 120 * 60 * 1000;
+fakeDocument.fire('visibilitychange');
+await flush();
+check('a later failure gets its own retry', shell.pendingTimeouts().length === 1, String(shell.pendingTimeouts().length));
+
+// Answer once more: that spends the armed retry and re-arms the allowance, so the
+// next phase is a fresh failure rather than a spent one.
+globalThis.fetch = githubStub('0.2.0');
+clock += 120 * 60 * 1000;
+fakeDocument.fire('visibilitychange');
+await flush();
+shell.fireTimeouts();
+await flush();
+check('an answer spends the armed retry', shell.pendingTimeouts().length === 0, String(shell.pendingTimeouts().length));
+
+// A check in flight when the card goes away must not arm a timer nothing owns.
+// The diagnostics route shares this fetch, so only the version read is held.
+let inFlight = null;
+globalThis.fetch = (url) => {
+  if (String(url).includes('api.github.com')) {
+    return new Promise((resolve, reject) => {
+      inFlight = { resolve, reject };
+    });
+  }
+  return Promise.resolve({ ok: true, status: 200, json: async () => ({ ok: true, adapted: [], available: [], thresholds: {} }) });
+};
+clock += 120 * 60 * 1000;
+fakeDocument.fire('visibilitychange');
+await flush();
+check('a check is in flight', inFlight !== null);
+cadence.cleanup();
+check('unmount clears the beat and the listeners', shell.intervals.every((timer) => timer.cleared === true) && (shell.listeners.focus ?? []).length === 0);
+inFlight.reject(new Error('GitHub 403'));
+await flush();
+check('a failure landing after unmount arms nothing', shell.pendingTimeouts().length === 0, String(shell.pendingTimeouts().length));
+
+Date.now = realNow;
+globalThis.fetch = realFetch;
+internal.__primeUpdate(idleUpdate);
 
 // The bundle-config seat renders a wrapper that subscribes to the entry form.
 // Its methods must be called ON the form: a detached `subscribe`/`getSnapshot`
