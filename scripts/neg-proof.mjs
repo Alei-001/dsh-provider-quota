@@ -7,7 +7,7 @@
 //   node scripts/neg-proof.mjs [pluginDir] [suitePath]
 //
 // A mutation that produces no failures means the suite has stopped guarding it.
-import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -152,6 +152,19 @@ for (const mutation of MUTATIONS) {
     recursive: true,
     filter: (src) => !src.slice(pluginDir.length).split(/[\\/]/).includes('node_modules'),
   });
+  // The throwaway copy carries the plugin's dependencies as a link rather than a
+  // second install. Without them the suite dies at the host half's peer import —
+  // a run that mutates the client half would still show its failures, but the
+  // counts would describe a truncated run, and a mutation guarded anywhere after
+  // that import would be counted as proved without ever being run.
+  const modules = join(pluginDir, 'node_modules');
+  if (existsSync(modules)) {
+    try {
+      symlinkSync(modules, join(dir, 'node_modules'), 'junction');
+    } catch (error) {
+      console.warn(`    (no dependency link for this copy: ${String(error?.message ?? error)})`);
+    }
+  }
   const clientPath = join(dir, 'lib', 'client.js');
   const before = readFileSync(clientPath, 'utf8');
   const after = mutation.mutate(before);
