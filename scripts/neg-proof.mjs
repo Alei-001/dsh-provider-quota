@@ -60,6 +60,47 @@ const MUTATIONS = [
     why: 'the page registers without whileServed, so an unserved namespace still shows a card',
     mutate: (code) => code.replace('return scope.configForms.whileServed([NS], function () {', 'return (function () {'),
   },
+  {
+    label: 'remote answer read as the value',
+    why: 'the check takes the answer itself for the bundle list, which is exactly how the update row was lost',
+    mutate(code) {
+      const direct = code.replace(
+        'Promise.resolve(manager.listBundles()).then(remoteResult),',
+        'Promise.resolve(manager.listBundles()),',
+      );
+      if (direct === code) throw new Error('wrapped bundle read not found');
+      return direct;
+    },
+  },
+  {
+    label: 'unreadable version passes for no update',
+    why: 'a comparison that cannot be made answers "current" again, so a broken check looks like an up-to-date install',
+    mutate(code) {
+      const bail = code.replace('if (installed === null || remote === null) {', 'if (false) {');
+      if (bail === code) throw new Error('readability guard not found');
+      return bail;
+    },
+  },
+  {
+    label: 'update row back inside the body',
+    why: 'the row hides behind the disclosure again, so nobody who leaves the card closed ever sees a release',
+    mutate(code) {
+      const inBody = code.replace('\n\t\t\t\tcheckLine,\n', '\n\t\t\t\tupdateRow,\n\t\t\t\tcheckLine,\n');
+      if (inBody === code) throw new Error('body head not found');
+      const outOfCard = inBody.replace('\t\t\t\tupdateRow,\n\t\t\t\topen ? bodyNode : null,\n', '\t\t\t\topen ? bodyNode : null,\n');
+      if (outOfCard === inBody) throw new Error('card-level row not found');
+      return outOfCard;
+    },
+  },
+  {
+    label: 'two notices, one state',
+    why: 'dismiss writes the save notice again, so the finished-update notice cannot be closed',
+    mutate(code) {
+      const shared = code.replace('setStoredNotice(null);', 'setSaveNotice(null);');
+      if (shared === code) throw new Error('stored-notice setter not found');
+      return shared;
+    },
+  },
 ];
 
 let proved = 0;

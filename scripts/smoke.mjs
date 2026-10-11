@@ -73,13 +73,37 @@ const fakeDocument = {
 };
 void capturedCss;
 
+/**
+ * The one thing a tab keeps between two loads: the finished-update notice. It is
+ * a real store here because "dismiss" has to be provable — the row is written by
+ * one card and read by the next, across the reload an update triggers.
+ */
+const sessionStore = new Map();
+const fakeSessionStorage = {
+  getItem: (key) => (sessionStore.has(key) ? sessionStore.get(key) : null),
+  setItem: (key, value) => sessionStore.set(key, String(value)),
+  removeItem: (key) => sessionStore.delete(key),
+};
+
 /** Materialize the shipped bundle against one require implementation. */
 function loadBundle(requireImpl) {
   const code = readFileSync(`${projectDir}/lib/client.js`, 'utf8');
   let bundle = null;
-  const win = { __ModuleLoader__: { load(spec) { bundle = spec; } }, setInterval: () => 0, clearInterval() {} };
+  // A shell with the timer, event and storage surface a browser has. The bundle
+  // asks for all of them, and a harness that lacks them would only prove the
+  // guards work.
+  const win = {
+    __ModuleLoader__: { load(spec) { bundle = spec; } },
+    setInterval: () => 0,
+    clearInterval() {},
+    setTimeout: () => 0,
+    clearTimeout() {},
+    addEventListener() {},
+    removeEventListener() {},
+    sessionStorage: fakeSessionStorage,
+  };
   new Function('window', 'document', code)(win, fakeDocument);
-  return { bundle, exports: bundle.factory(requireImpl) };
+  return { bundle, exports: bundle.factory(requireImpl), win };
 }
 
 const liveRequire = (id) => {
@@ -126,18 +150,27 @@ async function mount(exports) {
       },
     },
     remote: {
-      // The update row's one dependency, as the client remotes expose it. The
-      // install call is recorded so the suite can read back the spec it was handed.
+      // The update row's one dependency, as the client remotes expose it: every
+      // unary call resolves to `RemoteResult` — `{ ok: true, value }`, or
+      // `{ ok: false, error }` — and never to the bare value. A harness that
+      // answered with the bare value is what let a dead update check pass this
+      // suite: `listBundles` returned an array here and a `RemoteResult` in the
+      // browser, so the row never appeared for anyone but the test.
       pluginManager: {
-        listBundles() { return Promise.resolve([{ name: 'dsh-provider-quota', version: '0.1.0' }]); },
+        listBundles() {
+          return Promise.resolve({ ok: true, value: [{ name: 'dsh-provider-quota', version: '0.1.0' }] });
+        },
         installBundle(spec, options) {
           seen.install = { spec, options };
           return Promise.resolve({
-            changed: true,
-            application: 'restart-required',
-            stage: 'enable',
-            target: 'dsh-provider-quota',
-            packageResult: { exitCode: 0, output: '' },
+            ok: true,
+            value: {
+              changed: true,
+              application: 'restart-required',
+              stage: 'enable',
+              target: 'dsh-provider-quota',
+              packageResult: { exitCode: 0, output: '' },
+            },
           });
         },
       },
@@ -472,6 +505,105 @@ check('failure: a failed run reports its diagnostic', internal.updateFailure({ a
 check('failure: a non-zero pnpm exit reports its output', internal.updateFailure({ application: 'restart-required', packageResult: { exitCode: 1, output: 'ENOENT' } }) === 'ENOENT');
 check('failure: a successful run reports nothing', internal.updateFailure({ application: 'restart-required', packageResult: { exitCode: 0, output: '' } }) === null);
 check('failure: a cancelled run is a failure too', internal.updateFailure({ application: 'cancelled' }) === 'cancelled');
+
+// The remote face's own shape. Every unary `ctx.remote` call resolves to
+// `RemoteResult` — `{ ok: true, value }` or `{ ok: false, error }` — so the
+// bundle list is the value INSIDE the answer. Handing `installedVersion` the
+// wrapper is exactly how the update row was lost: it read "installed version
+// unknown" in every real deployment, and the row it would have drawn never
+// appeared for anyone.
+check('remote: an answer carries its value', JSON.stringify(internal.remoteResult({ ok: true, value: [1, 2] })) === '[1,2]');
+check('remote: a plain value passes through', internal.remoteResult('plain') === 'plain' && internal.remoteResult(null) === null);
+check(
+  'remote: a refusal keeps its code and its message',
+  (() => {
+    try {
+      internal.remoteResult({ ok: false, error: { code: 'gateway/offline', message: 'carrier gone' } });
+      return false;
+    } catch (error) {
+      return String(error.message) === 'gateway/offline: carrier gone';
+    }
+  })(),
+);
+check(
+  'failure: a refused call is a failure, not a success',
+  internal.updateFailure({ ok: false, error: { code: 'gateway/offline', message: 'carrier gone' } }) === 'gateway/offline: carrier gone',
+);
+check(
+  'failure: a wrapped failed run reports its diagnostic',
+  internal.updateFailure({ ok: true, value: { application: 'failed', error: { diagnostic: 'boom' } } }) === 'boom',
+);
+check(
+  'failure: a wrapped non-zero exit reports its output',
+  internal.updateFailure({ ok: true, value: { application: 'restart-required', packageResult: { exitCode: 1, output: 'ENOENT' } } }) === 'ENOENT',
+);
+check(
+  'failure: a wrapped successful run reports nothing',
+  internal.updateFailure({ ok: true, value: { application: 'restart-required', packageResult: { exitCode: 0, output: '' } } }) === null,
+);
+
+// The whole check, against the shape a deployment really answers with: a wrapped
+// bundle list, the published manifest, and the commit a newer release points at.
+const realCheckFetch = globalThis.fetch;
+const asked = [];
+const githubAnswering = (version) => async (url) => {
+  asked.push(String(url));
+  if (String(url).includes('/contents/package.json')) {
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ content: Buffer.from(JSON.stringify({ version })).toString('base64') }),
+    };
+  }
+  if (String(url).includes('/commits/')) return { ok: true, status: 200, json: async () => ({ sha: 'deadbeefcafe1234' }) };
+  return { ok: false, status: 404, json: async () => ({}) };
+};
+const wrappedBundles = (version) => ({
+  listBundles: () => Promise.resolve({ ok: true, value: [{ name: 'dsh-provider-quota', version }] }),
+});
+globalThis.fetch = githubAnswering('0.2.0');
+const availableCheck = await internal.runUpdateCheck(wrappedBundles('0.1.0'));
+check(
+  'check: a wrapped bundle list yields the row it should',
+  availableCheck.status === 'available' &&
+    availableCheck.installed === '0.1.0' &&
+    availableCheck.remote === '0.2.0' &&
+    availableCheck.sha === 'deadbeefcafe1234',
+  JSON.stringify(availableCheck),
+);
+check('check: the commit is read once, and only for a newer release', asked.filter((url) => url.includes('/commits/')).length === 1, asked.join(' '));
+globalThis.fetch = githubAnswering('0.1.0');
+const currentCheck = await internal.runUpdateCheck(wrappedBundles('0.1.0'));
+check('check: an up-to-date install draws nothing', currentCheck.status === 'current', JSON.stringify(currentCheck));
+globalThis.fetch = async () => {
+  throw new Error('GitHub 403');
+};
+const failedCheck = await internal.runUpdateCheck(wrappedBundles('0.1.0'));
+check(
+  'check: a carrier failure says so instead of passing for "no update"',
+  failedCheck.status === 'error' && failedCheck.unreadable === false && failedCheck.error === 'GitHub 403',
+  JSON.stringify(failedCheck),
+);
+globalThis.fetch = githubAnswering('0.2.0');
+const unknownCheck = await internal.runUpdateCheck({
+  listBundles: () => Promise.resolve({ ok: true, value: [{ name: 'another-package', version: '9.9.9' }] }),
+});
+check(
+  'check: a bundle list without this package is unreadable, not current',
+  unknownCheck.status === 'error' && unknownCheck.unreadable === true,
+  JSON.stringify(unknownCheck),
+);
+const refusedCheck = await internal.runUpdateCheck({
+  listBundles: () => Promise.resolve({ ok: false, error: { code: 'gateway/offline', message: 'carrier gone' } }),
+});
+check(
+  'check: a refused bundle read is reported, not swallowed',
+  refusedCheck.status === 'error' && refusedCheck.error === 'gateway/offline: carrier gone',
+  JSON.stringify(refusedCheck),
+);
+check('check: no manager means no check at all', (await internal.runUpdateCheck(null)) === null);
+globalThis.fetch = realCheckFetch;
+
 check(
   'spec: the install spec pins the commit in the alias form',
   internal.installSpecFor('deadbeef') === 'dsh-provider-quota@github:Alei-001/dsh-provider-quota#deadbeef',
@@ -528,34 +660,64 @@ check('the header is a button with a labelled disclosure', collapsedHtml.include
 check('the open card points its header at the body', /aria-controls="([^"]+)"/.test(settingsHtml) && settingsHtml.includes('class="dsog-card-body" id="'));
 check('the open card says how to close it', settingsHtml.includes('aria-label="收起: 供应商额度"') && settingsHtml.includes('data-open="true"'));
 
-// The update row: it appears inside the expanded card, and only while the remote
-// carries a newer release. Nothing is added to the header row — the card opens on
-// exactly the same title, summary and chevron it always had.
+// The update row: it rides the card rather than its body, so a release is on
+// screen whether or not the reader ever expands the disclosure — nobody should
+// have to find a new version, or ask for one. The header button itself is
+// untouched: same title, same summary, same chevron.
 const renderCard = (extra) =>
   renderToStaticMarkup(
     React.createElement(internal.ProviderQuotaSettings, Object.assign({ view: 'page', form: settingsForm, defaultOpen: true }, extra)),
   );
+const renderCollapsedCard = () =>
+  renderToStaticMarkup(React.createElement(internal.ProviderQuotaSettings, { view: 'page', form: settingsForm }));
 const idleUpdate = { status: 'idle', installed: null, remote: null, sha: null, busy: false, error: null, notice: null };
 internal.__primeUpdate({ status: 'available', installed: '0.1.0', remote: '0.2.0', sha: 'deadbeefcafe1234', busy: false, error: null, notice: null });
 const updateHtml = renderCard({});
+const collapsedUpdate = renderCollapsedCard();
+// The header button, by its own tags: the stylesheet mentions every class in the
+// card, so a slice of the markup has to start after it.
+const headStart = updateHtml.indexOf('<button');
+const headEnd = updateHtml.indexOf('</button>') + '</button>'.length;
 check('an available update adds one row', updateHtml.includes('class="dsog-update"') && updateHtml.includes('有新版本 v0.2.0'), updateHtml.slice(0, 200));
-check('the row names the installed version and the commit', updateHtml.includes('当前 v0.1.0') && updateHtml.includes('deadbee'));
+check(
+  'the row is one line: what is published, the commit, what is installed',
+  updateHtml.includes('有新版本 v0.2.0 → deadbee · 当前 v0.1.0'),
+  updateHtml.slice(updateHtml.indexOf('dsog-update'), updateHtml.indexOf('dsog-update') + 300),
+);
 check('the row offers the update', updateHtml.includes('>更新<'));
-check('the row sits above the diagnostics', updateHtml.indexOf('class="dsog-update"') < updateHtml.indexOf('class="dsog-page-title"'));
-check('nothing was added to the header row', !updateHtml.slice(0, updateHtml.indexOf('dsog-card-body')).includes('更新'));
+check('the row rides the card, under its header button', updateHtml.indexOf('class="dsog-update"') > headEnd);
+check('the row sits above the body', updateHtml.indexOf('class="dsog-update"') < updateHtml.indexOf('class="dsog-card-body"'));
+check('nothing was added to the header button', headStart > 0 && headEnd > headStart && !updateHtml.slice(headStart, headEnd).includes('dsog-update'));
+check(
+  'a collapsed card shows the row too',
+  collapsedUpdate.includes('class="dsog-update"') &&
+    collapsedUpdate.includes('有新版本 v0.2.0') &&
+    collapsedUpdate.includes('>更新<') &&
+    !collapsedUpdate.includes('class="dsog-card-body"'),
+  collapsedUpdate.slice(0, 200),
+);
 internal.__primeUpdate({ status: 'available', installed: '0.1.0', remote: '0.2.0', sha: 'deadbeefcafe1234', busy: false, error: 'ENOENT', notice: null });
 check('a failed update says why in the row', renderCard({}).includes('更新失败：ENOENT'));
 internal.__primeUpdate({ status: 'updated', installed: '0.1.0', remote: '0.2.0', sha: null, busy: false, error: null, notice: { version: '0.2.0', application: 'restart-required' } });
 const updatedHtml = renderCard({});
 check('a finished update leaves the restart notice', updatedHtml.includes('已更新到 v0.2.0') && updatedHtml.includes('重启 DSH') && updatedHtml.includes('知道了'));
 check('the finished notice replaces the update button', !updatedHtml.includes('>更新<'));
+check('the finished notice rides the card as well', !renderCollapsedCard().includes('class="dsog-card-body"') && renderCollapsedCard().includes('已更新到 v0.2.0'));
+internal.__primeUpdate({ status: 'error', installed: null, remote: null, sha: null, busy: false, error: 'GitHub 403', unreadable: false, notice: null });
+const failedCheckHtml = renderCard({});
+check(
+  'a check that could not answer says so in the body',
+  failedCheckHtml.includes('版本检查失败：GitHub 403') &&
+    failedCheckHtml.indexOf('版本检查失败') > failedCheckHtml.indexOf('class="dsog-card-body"'),
+  failedCheckHtml.slice(failedCheckHtml.indexOf('dsog-card-body'), failedCheckHtml.indexOf('dsog-card-body') + 300),
+);
+check('and says nothing in the header', !renderCollapsedCard().includes('版本检查失败'));
+internal.__primeUpdate({ status: 'error', installed: null, remote: null, sha: null, busy: false, error: null, unreadable: true, notice: null });
+check('an unreadable answer says which half is missing', renderCard({}).includes('读不到已安装版本或仓库版本'));
 internal.__primeUpdate({ status: 'current', installed: '0.2.0', remote: '0.2.0', sha: null, busy: false, error: null, notice: null });
 const currentHtml = renderCard({});
 check('an up-to-date install shows no update row', !currentHtml.includes('class="dsog-update"') && !currentHtml.includes('更新'), currentHtml.slice(0, 160));
-const collapsedUpdate = renderToStaticMarkup(
-  React.createElement(internal.ProviderQuotaSettings, { view: 'page', form: settingsForm }),
-);
-check('a collapsed card hides the row as well', !collapsedUpdate.includes('class="dsog-update"'));
+check('a collapsed up-to-date card shows no row either', !renderCollapsedCard().includes('class="dsog-update"'));
 internal.__primeUpdate(idleUpdate);
 check(
   'the page says so when the Host offers no form',
@@ -779,6 +941,23 @@ check(
     find(afterTree, (node) => node.type === internal.UpdateNotice)?.props.notice.application === 'restart-required',
 );
 internal.__primeUpdate(idleUpdate);
+
+// The notice a completed update leaves for the reload, and the one control it
+// has. This is where the card once held two states under one name — the second
+// declaration took the first one's setter, so "知道了" wrote the save notice and
+// the update notice stayed on screen for good.
+const NOTICE_KEY = 'dsh-provider-quota/updated';
+live.win.sessionStorage.setItem(NOTICE_KEY, JSON.stringify({ version: '0.2.0', application: 'restart-required' }));
+const noticeRender = hookRender(live.exports.__internal.ProviderQuotaSettings, { view: 'page', form: readyForm });
+const noticeElement = find(noticeRender(), (node) => node.type === internal.UpdateNotice);
+check('a notice the reload left behind is still shown', noticeElement !== null && noticeElement.props.notice.version === '0.2.0');
+const noticeTree = hookRender(internal.UpdateNotice, noticeElement.props)();
+const dismissControl = button(noticeTree, '知道了');
+check('the notice can be dismissed', typeof dismissControl?.props.onClick === 'function');
+await dismissControl.props.onClick();
+check('dismissing it takes the notice off the card', find(noticeRender(), (node) => node.type === internal.UpdateNotice) === null);
+check('dismissing it forgets the notice', live.win.sessionStorage.getItem(NOTICE_KEY) === null);
+check('a dismissed notice stays gone on the next mount', find(hookRender(live.exports.__internal.ProviderQuotaSettings, { view: 'page', form: readyForm })(), (node) => node.type === internal.UpdateNotice) === null);
 
 // The bundle-config seat renders a wrapper that subscribes to the entry form.
 // Its methods must be called ON the form: a detached `subscribe`/`getSnapshot`
