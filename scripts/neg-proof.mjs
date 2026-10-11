@@ -143,6 +143,25 @@ const MUTATIONS = [
       return orphaned;
     },
   },
+  {
+    label: 'the drawn row lists every adapter',
+    why: 'a provider this host does not serve is claimed as drawn, when its cell stays empty anyway',
+    mutate(code) {
+      const unserved = code.replace('var measured = matched !== null ? matched : adapted;', 'var measured = adapted;');
+      if (unserved === code) throw new Error('matched fallback not found');
+      return unserved;
+    },
+  },
+  {
+    label: 'aliases are not named',
+    why: 'the page reads one wallet twice: deepseek looks like a third vendor instead of another spelling',
+    file: 'lib/index.js',
+    mutate(code) {
+      const unnamed = code.replace('aliases: aliasIndex(),', 'aliases: {},');
+      if (unnamed === code) throw new Error('alias payload not found');
+      return unnamed;
+    },
+  },
 ];
 
 let proved = 0;
@@ -165,11 +184,13 @@ for (const mutation of MUTATIONS) {
       console.warn(`    (no dependency link for this copy: ${String(error?.message ?? error)})`);
     }
   }
-  const clientPath = join(dir, 'lib', 'client.js');
-  const before = readFileSync(clientPath, 'utf8');
+  // A mutation names its own file: most guards live in the client half, and the
+  // discovery answer — the aliases among them — is the host's.
+  const mutatedPath = join(dir, mutation.file ?? join('lib', 'client.js'));
+  const before = readFileSync(mutatedPath, 'utf8');
   const after = mutation.mutate(before);
   if (after === before) throw new Error(`mutation "${mutation.label}" changed nothing — the code it targets moved`);
-  writeFileSync(clientPath, after);
+  writeFileSync(mutatedPath, after);
   let out = '';
   try {
     out = execFileSync(process.execPath, [suite], {

@@ -688,12 +688,13 @@ check(
 check('the page names the balance warning', settingsHtml.includes('余额预警值') && settingsHtml.includes('余额危险值'));
 check('the page offers save and restore', settingsHtml.includes('保存') && settingsHtml.includes('恢复默认'));
 check('the page names its section', settingsHtml.includes('本机可测量的供应商'));
-check('the page shows the two rows the question needs', settingsHtml.includes('已适配') && settingsHtml.includes('本机提供'));
-check('the page lists no derived overlap', !settingsHtml.includes('会显示'));
-// Two diagnostic rows plus the refresh control, which is disabled while the read
-// is in flight and says so.
-check('the page shows both rows and its refresh control waiting', (settingsHtml.match(/读取中…/g) ?? []).length === 3, String((settingsHtml.match(/读取中…/g) ?? []).length));
-check('the page warns in a count, not a paragraph', !settingsHtml.includes('永远不会显示') && !settingsHtml.includes('会显示'));
+check('the page shows what will be drawn and what the host serves', settingsHtml.includes('会显示') && settingsHtml.includes('本机提供'));
+// The two rows while the read is in flight; the control that used to sit beside
+// them is gone on purpose, because the list is read on mount and on every return
+// to the tab.
+check('the page shows both rows waiting for the read', (settingsHtml.match(/读取中…/g) ?? []).length === 2, String((settingsHtml.match(/读取中…/g) ?? []).length));
+check('the page offers no refresh button for a list that reads itself', !settingsHtml.includes('刷新供应商列表') && !settingsHtml.includes('Refresh provider list'));
+check('the page warns in a note, not a paragraph', !settingsHtml.includes('永远不会显示') && !settingsHtml.includes('dsog-diag-note'));
 check('the page paints from the shared tokens', cssOf(settingsHtml).includes('.dsog-field') && cssOf(settingsHtml).includes('.dsog-pill'));
 
 // The card is a disclosure like the host's own plugin cards: a header that
@@ -803,6 +804,10 @@ globalThis.fetch = async () => ({
     adapted: ['opencode-go', 'deepseek-official', 'deepseek', 'deepseek-account'],
     available: ['opencode-go', 'deepseek-official', 'deepseek-account', 'openai'],
     matched: ['opencode-go', 'deepseek-official', 'deepseek-account'],
+    // The host's own answer to "which ids are only another name": openai has no
+    // adapter (the no-adapter note), deepseek is a spelling of deepseek-official
+    // (the not-served note says so).
+    aliases: { deepseek: 'deepseek-official' },
     thresholds: { warn: 30, danger: 10 },
   }),
 });
@@ -1086,6 +1091,54 @@ await dismissControl.props.onClick();
 check('dismissing it takes the notice off the card', find(noticeRender(), (node) => node.type === internal.UpdateNotice) === null);
 check('dismissing it forgets the notice', live.win.sessionStorage.getItem(NOTICE_KEY) === null);
 check('a dismissed notice stays gone on the next mount', find(hookRender(live.exports.__internal.ProviderQuotaSettings, { view: 'page', form: readyForm })(), (node) => node.type === internal.UpdateNotice) === null);
+
+// ------------------------------------------------- what the diagnostics answer
+// The discovery answer only reaches the page through an effect, so this is the
+// one place the two rows and their notes can be rendered from a real payload —
+// including the alias and the missing adapter the notes exist to explain.
+console.log('client half — diagnostics');
+internal.__primeUpdate(idleUpdate);
+const diagRender = hookRender(
+  live.exports.__internal.ProviderQuotaSettings,
+  { view: 'page', form: readyForm, defaultOpen: true },
+  { effects: true },
+);
+diagRender();
+await new Promise((resolve) => setTimeout(resolve, 0));
+const diagHtml = renderToStaticMarkup(diagRender());
+const drawnSlice = diagHtml.slice(diagHtml.indexOf('会显示'), diagHtml.indexOf('本机提供'));
+check(
+  'the drawn row lists exactly what the host will measure',
+  ['opencode-go', 'deepseek-official', 'deepseek-account'].every((id) => drawnSlice.includes('>' + id + '<')) &&
+    !drawnSlice.includes('>openai<') &&
+    !drawnSlice.includes('>deepseek<'),
+  drawnSlice,
+);
+check('the served row lists what the host serves, adapter or not', diagHtml.includes('>openai</span>'));
+check(
+  'the gaps are notes, not rows',
+  /class="dsog-hint"[^>]*>还没有适配器：openai</.test(diagHtml) &&
+    /class="dsog-hint"[^>]*>本机没有提供：deepseek（deepseek-official 的别名）</.test(diagHtml),
+  diagHtml.slice(diagHtml.indexOf('还没有适配器') - 80, diagHtml.indexOf('还没有适配器') + 200),
+);
+// An older host answers without `aliases`: the note still appears, as the bare id.
+const realDiagFetch = globalThis.fetch;
+globalThis.fetch = async () => ({
+  ok: true,
+  status: 200,
+  json: async () => ({
+    ok: true,
+    adapted: ['deepseek-official', 'deepseek'],
+    available: ['deepseek-official'],
+    matched: ['deepseek-official'],
+    thresholds: { warn: 30, danger: 10 },
+  }),
+});
+const bareRender = hookRender(live.exports.__internal.ProviderQuotaSettings, { view: 'page', form: readyForm, defaultOpen: true }, { effects: true });
+bareRender();
+await new Promise((resolve) => setTimeout(resolve, 0));
+check('without the alias map the note still names the id', renderToStaticMarkup(bareRender()).includes('本机没有提供：deepseek'), renderToStaticMarkup(bareRender()).slice(-260));
+globalThis.fetch = realDiagFetch;
 
 // ------------------------------------------------------------ the update cadence
 // Everything above renders markup. This block runs the card's effects, on a clock
@@ -1496,6 +1549,19 @@ check(
   'an adapted id no provider serves is not offered',
   !(discovery.json?.matched ?? []).includes('deepseek'),
   JSON.stringify(discovery.json?.matched),
+);
+// The one alias in this package: `deepseek` is the same provider as
+// `deepseek-official` under pi-ai's catalog spelling, so the page must be able to
+// say that instead of describing one wallet twice.
+check(
+  'discovery names the ids that are only another spelling',
+  JSON.stringify(discovery.json?.aliases) === '{"deepseek":"deepseek-official"}',
+  JSON.stringify(discovery.json?.aliases),
+);
+check(
+  'an adapter with a single spelling contributes no alias',
+  discovery.json?.aliases?.opencode === undefined && discovery.json?.aliases?.['deepseek-account'] === undefined,
+  JSON.stringify(discovery.json?.aliases),
 );
 check(
   'discovery carries the tone cut points the page edits',

@@ -23,8 +23,13 @@ DeepSeek Harness 的供应商额度指示器：在输入框的「联网搜索」
 | 供应商 id | 数据来源 | 显示 |
 |---|---|---|
 | `opencode-go` | OpenCode Go 套餐接口 | 5 小时 / 本周 / 本月 |
-| `deepseek-official`、`deepseek` | DeepSeek 官方 API 余额 | 账户余额（金额） |
+| `deepseek-official` | DeepSeek 官方 API 余额（`api.deepseek.com/user/balance`） | 账户余额（金额） |
 | `deepseek-account` | DeepSeek 账号平台 | 充值余额 + 赠送余额 |
+| `deepseek` | 同上官方 API 余额 | 别名，见下 |
+
+DeepSeek 确实是两个独立系统，这是 DSH 自己拆的：`deepseek-official` 花的是 API key 那个钱包（`dsh-llm-deepseek-api-key` 注册），`deepseek-account` 花的是登录账号那个钱包（`dsh-llm-deepseek-account` 注册），两边余额互不相通。
+
+`deepseek` 不是第三个厂商，而是**同一个官方 API 的另一种路由写法**：DSH 原生那套适配器把它注册为 `deepseek-official`，而 pi-ai 目录（`@earendil-works/pi-ai`）里这个厂商就叫 `deepseek`——`dsh-llm-pi-ai` 自己也明确保留 `providers: { deepseek: … }` 这种配置。适配器认这两个 id，是因为插件无法知道你这份 composition 用的是哪一套；命中的是同一个余额接口。一个适配器声明的**第一个** id 是 DSH 注册的那个名字，后面的都是别名，宿主会把这个对应关系发给插件页，页面上会写成 `deepseek（deepseek-official 的别名）`。
 
 其余 id 一律不显示。要加新供应商，照着 `lib/providers/` 里的适配器写一个即可。
 
@@ -42,8 +47,11 @@ dsh plugin --profile desktop add "git+ssh://git@github.com/Alei-001/dsh-provider
 
 **插件页的卡片**：默认折叠，展开后是「本机可测量的供应商」和六个可配置字段（见下）。
 
-- **「刷新供应商列表」按钮**：只重读宿主那一份「哪些供应商能被测量」的名单（诊断用，跟更新无关）。回到这个标签页时也会自动重读，平时不用点。
-- **阈值那行**：当前生效的预警/危险值，也就是卡片头部那枚胶囊的文字。
+「本机可测量的供应商」只有两行、没有任何按钮，进页面时读一次、每次回到这个标签页再读一次：
+
+- `会显示`：这份插件现在真的会给你画额度的供应商（适配器和宿主路由的交集）。
+- `本机提供`：宿主当前注册了适配器的全部路由。
+- 两行下面的灰字是两者的差集，各占一行：`还没有适配器：…`（选了它不会显示额度）、`本机没有提供：…`（这个 id 本机没有对应供应商）。没有差集就不显示。
 
 ## 更新
 
@@ -90,8 +98,8 @@ npm init -y; npm install react@18 react-dom@18
 ```
 
 ```powershell
-node scripts/smoke.mjs       # 337 条断言
-node scripts/neg-proof.mjs   # 故意改坏 12 处，确认测试真会变红
+node scripts/smoke.mjs       # 343 条断言
+node scripts/neg-proof.mjs   # 故意改坏 14 处，确认测试真会变红
 ```
 
 冒烟测试里有一段**会真的跑 effect** 的装配（`hookRender(..., { effects: true })`）：自带的窗口给得出 setTimeout/setInterval 和事件，时钟和网络由测试接管，所以「挂载就问一次 / 回标签页的冷却 / 每小时预算 / 只重试一次 / 卸载后不再多问 / 重检时那一行不会闪掉」都是被断言过的，不是靠读代码相信的。
