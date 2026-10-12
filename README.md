@@ -25,11 +25,10 @@ DeepSeek Harness 的供应商额度指示器：在输入框的「联网搜索」
 | `opencode-go` | OpenCode Go 套餐接口 | 5 小时 / 本周 / 本月 |
 | `deepseek-official` | DeepSeek 官方 API 余额（`api.deepseek.com/user/balance`） | 账户余额（金额） |
 | `deepseek-account` | DeepSeek 账号平台 | 充值余额 + 赠送余额 |
-| `deepseek` | 同上官方 API 余额 | 别名，见下 |
 
-DeepSeek 确实是两个独立系统，这是 DSH 自己拆的：`deepseek-official` 花的是 API key 那个钱包（`dsh-llm-deepseek-api-key` 注册），`deepseek-account` 花的是登录账号那个钱包（`dsh-llm-deepseek-account` 注册），两边余额互不相通。
+DeepSeek 是两个独立系统，这是 DSH 自己拆的：`deepseek-official` 花的是 API key 那个钱包（`dsh-llm-deepseek-api-key` 注册），`deepseek-account` 花的是登录账号那个钱包（`dsh-llm-deepseek-account` 注册），两边余额互不相通。
 
-`deepseek` 不是第三个厂商，而是**同一个官方 API 的另一种路由写法**：DSH 原生那套适配器把它注册为 `deepseek-official`，而 pi-ai 目录（`@earendil-works/pi-ai`）里这个厂商就叫 `deepseek`——`dsh-llm-pi-ai` 自己也明确保留 `providers: { deepseek: … }` 这种配置。适配器认这两个 id，是因为插件无法知道你这份 composition 用的是哪一套；命中的是同一个余额接口。一个适配器声明的**第一个** id 是 DSH 注册的那个名字，后面的都是别名，宿主会把这个对应关系发给插件页，页面上会写成 `deepseek（deepseek-official 的别名）`。
+插件另外也认 `deepseek` 这个 id —— 那是同一个官方 API 在 pi-ai 目录（`@earendil-works/pi-ai`）里的写法，命中同一个余额接口；哪个名字出现在页面上，取决于你这份 composition 用哪套路由，两者不会同时出现。
 
 其余 id 一律不显示。要加新供应商，照着 `lib/providers/` 里的适配器写一个即可。
 
@@ -47,11 +46,7 @@ dsh plugin --profile desktop add "git+ssh://git@github.com/Alei-001/dsh-provider
 
 **插件页的卡片**：默认折叠，展开后是「本机可测量的供应商」和六个可配置字段（见下）。
 
-「本机可测量的供应商」只有两行、没有任何按钮，进页面时读一次、每次回到这个标签页再读一次：
-
-- `会显示`：这份插件现在真的会给你画额度的供应商（适配器和宿主路由的交集）。
-- `本机提供`：宿主当前注册了适配器的全部路由。
-- 两行下面的灰字是两者的差集，各占一行：`还没有适配器：…`（选了它不会显示额度）、`本机没有提供：…`（这个 id 本机没有对应供应商）。没有差集就不显示。
+「本机可测量的供应商」就一行供应商 id：**这台机器真的会画额度的那些**（插件有适配器、宿主也注册了路由的交集）。没有按钮，进页面读一次、每次回到这个标签页再读一次；一个都不匹配时显示「无」，读不到时显示「读取失败」和原因。宿主能路由但没有适配器的（例如 `opencode-go-free`），以及适配器有但你这里没路由的，都不会出现在这一行 —— 它们对应的格子本来也不会亮。
 
 ## 更新
 
@@ -98,7 +93,7 @@ npm init -y; npm install react@18 react-dom@18
 ```
 
 ```powershell
-node scripts/smoke.mjs       # 343 条断言
+node scripts/smoke.mjs       # 338 条断言
 node scripts/neg-proof.mjs   # 故意改坏 14 处，确认测试真会变红
 ```
 
